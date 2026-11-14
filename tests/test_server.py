@@ -15,15 +15,19 @@ from mysql_mcp.server import (
     get_query_patterns_resource,
     get_schema,
     get_schema_resource,
+    list_databases,
     list_tables,
     mcp,
     optimize_query,
     test_connection as tool_test_connection,
+    use_database,
 )
 
 EXPECTED_TOOLS = {
     "test_connection",
     "configure_connection",
+    "list_databases",
+    "use_database",
     "list_tables",
     "describe_table",
     "get_schema",
@@ -45,12 +49,12 @@ EXPECTED_PROMPTS = {
 
 
 class TestServerRegistration:
-    """Test that all 9 tools, 2 resources, and 2 prompts are registered with FastMCP."""
+    """Test that all 11 tools, 2 resources, and 2 prompts are registered with FastMCP."""
 
     def test_tools_registered(self):
         registered_tools = {t.name for t in asyncio.run(mcp.list_tools())}
         assert EXPECTED_TOOLS.issubset(registered_tools)
-        assert len(registered_tools) == 9
+        assert len(registered_tools) == 11
 
     def test_resources_registered(self):
         registered_resources = {str(r.uri) for r in asyncio.run(mcp.list_resources())}
@@ -64,7 +68,7 @@ class TestServerRegistration:
 
 
 class TestToolExecution:
-    """Test execution and error handling of all 9 MCP tools."""
+    """Test execution and error handling of all MCP tools."""
 
     def test_tool_test_connection(self):
         res = tool_test_connection()
@@ -75,11 +79,35 @@ class TestToolExecution:
         assert res["database"] == "ecommerce_demo"
 
     def test_tool_configure_connection(self):
-        res = configure_connection(database="ecommerce_demo")
+        res = configure_connection(database="ecommerce_demo", save_config=False)
         assert isinstance(res, dict)
         assert res["status"] == "configured"
         assert res["connected"] is True
         assert res["active_configuration"]["database"] == "ecommerce_demo"
+
+    def test_tool_list_databases(self):
+        dbs = list_databases()
+        assert isinstance(dbs, list)
+        names = {d["database_name"] for d in dbs}
+        assert "ecommerce_demo" in names
+        assert "information_schema" in names
+
+        info_schema_entry = next(d for d in dbs if d["database_name"] == "information_schema")
+        assert info_schema_entry["is_system"] is True
+
+        user_db_entry = next(d for d in dbs if d["database_name"] == "ecommerce_demo")
+        assert user_db_entry["is_system"] is False
+
+    def test_tool_use_database_valid(self):
+        res = use_database("ecommerce_demo")
+        assert res["status"] == "switched"
+        assert res["active_database"] == "ecommerce_demo"
+        assert res["connected"] is True
+
+    def test_tool_use_database_nonexistent(self):
+        with pytest.raises(ValueError) as exc:
+            use_database("non_existent_db_xyz_999")
+        assert "does not exist on this MySQL server" in str(exc.value)
 
     def test_tool_list_tables(self):
         tables = list_tables()

@@ -9,7 +9,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 from fastmcp import FastMCP
 
-from mysql_mcp.config import get_settings
+from mysql_mcp.config import get_settings, persist_config
 from mysql_mcp.db import (
     close_pool,
     execute_query as db_execute_query,
@@ -54,7 +54,7 @@ class CustomDataEncoder(json.JSONEncoder):
 
 
 # ==============================================================================
-# MCP Tools (9 Tools)
+# MCP Tools (11 Tools)
 # ==============================================================================
 
 
@@ -75,22 +75,33 @@ def configure_connection(
     user: Optional[str] = None,
     password: Optional[str] = None,
     database: Optional[str] = None,
+    save_config: bool = True,
 ) -> Dict[str, Any]:
     """
-    Update connection credentials dynamically at runtime and reinitialize pool.
+    Update connection credentials dynamically at runtime, reinitialize pool,
+    and optionally persist credentials to ~/.mysql-mcp/config.json.
     """
     settings = get_settings()
 
+    updates: Dict[str, Any] = {}
     if host is not None:
         settings.mysql_host = host
+        updates["mysql_host"] = host
     if port is not None:
         settings.mysql_port = port
+        updates["mysql_port"] = port
     if user is not None:
         settings.mysql_user = user
+        updates["mysql_user"] = user
     if password is not None:
         settings.mysql_password = password
+        updates["mysql_password"] = password
     if database is not None:
-        settings.mysql_database = database
+        settings.mysql_database = database if database != "" else None
+        updates["mysql_database"] = settings.mysql_database
+
+    if save_config and updates:
+        persist_config(updates)
 
     # Close existing pool and wipe caches
     close_pool()
@@ -109,7 +120,80 @@ def configure_connection(
             "user": settings.mysql_user,
             "database": settings.mysql_database,
         },
+        "saved_persistently": save_config,
         "ping": ping_result,
+    }
+
+
+@mcp.tool()
+def list_databases() -> List[Dict[str, Any]]:
+    """
+    List all accessible databases on the connected MySQL instance,
+    indicating the active database and identifying system catalogs.
+    """
+    pool = get_pool()
+    with pool.acquire() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SHOW DATABASES;")
+            rows = cursor.fetchall()
+            db_names = [list(r.values())[0] for r in rows]
+
+    current_db = get_settings().mysql_database
+    system_dbs = {"information_schema", "mysql", "performance_schema", "sys"}
+
+    result: List[Dict[str, Any]] = []
+    for db in sorted(db_names):
+        result.append({
+            "database_name": db,
+            "is_active": db.lower() == (current_db or "").lower(),
+            "is_system": db.lower() in system_dbs,
+        })
+
+    return result
+
+
+@mcp.tool()
+def use_database(database_name: str) -> Dict[str, Any]:
+    """
+    Switch the active MySQL database at runtime.
+    Validates that the database exists, switches connection pool context,
+    and updates persistent configuration.
+    """
+    target_db = database_name.strip()
+    if not target_db:
+        raise ValueError("Database name cannot be empty.")
+
+    # Verify database exists on server
+    pool = get_pool()
+    with pool.acquire() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SHOW DATABASES;")
+            existing = {list(r.values())[0].lower() for r in cursor.fetchall()}
+
+    if target_db.lower() not in existing:
+        raise ValueError(
+            f"Database '{target_db}' does not exist on this MySQL server. "
+            f"Available databases: {sorted(list(existing))}"
+        )
+
+    settings = get_settings()
+    previous_db = settings.mysql_database
+    settings.mysql_database = target_db
+
+    # Re-establish pool with the new database context
+    close_pool()
+
+    # Persist database preference
+    persist_config({"mysql_database": target_db})
+
+    # Test connection with new database
+    ping_res = get_pool().ping()
+
+    return {
+        "status": "switched",
+        "previous_database": previous_db,
+        "active_database": target_db,
+        "connected": ping_res.get("status") == "healthy",
     }
 
 
@@ -153,7 +237,6 @@ def describe_table(table_name: str) -> Dict[str, Any]:
     table_info = schema.get("tables", {}).get(table_name)
 
     if not table_info:
-        # Check views
         view_info = schema.get("views", {}).get(table_name)
         if view_info:
             return {
@@ -333,12 +416,10 @@ def export_query_results(
     if fmt not in ("csv", "json"):
         raise ValueError("Export format must be either 'csv' or 'json'.")
 
-    # Execute query without auto limit clamp (fetch requested export set)
     result = db_execute_query(sql, auto_limit=False)
     columns = result["columns"]
     rows = result["rows"]
 
-    # Determine filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if filename:
         target_name = filename if filename.endswith(f".{fmt}") else f"{filename}.{fmt}"
@@ -460,6 +541,11 @@ ANALYSIS CHECKLIST:
 # CLI Entrypoint
 # ==============================================================================
 
-if __name__ == "__main__":
+
+def main() -> None:
+    """Main CLI entrypoint for FastMCP server."""
     mcp.run()
 
+
+if __name__ == "__main__":
+    main()

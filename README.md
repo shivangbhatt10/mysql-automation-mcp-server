@@ -2,18 +2,27 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastMCP](https://img.shields.io/badge/MCP-FastMCP-green.svg)](https://github.com/jlowin/fastmcp)
-[![Tests](https://img.shields.io/badge/tests-76%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-79%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Model Context Protocol (MCP) server for MySQL database operations, schema exploration, query execution, safety guardrails, and natural language analytics.
+A Model Context Protocol (MCP) server for MySQL database operations, schema exploration, dynamic database switching, query execution, safety guardrails, and natural language analytics.
 
-Built for seamless integration with **OpenClaw**, **Claude Desktop**, and agentic AI workflows.
+Designed for universal, portable distribution across **OpenClaw**, **Claude Desktop**, and agentic AI systems on Windows, macOS, and Linux.
 
 ---
 
 ## Key Features
 
-- **9 Production-Ready MCP Tools**: Connection health testing, dynamic runtime credential reconfiguration, table listing, deep schema inspection, safe read query execution, transactional mutations, multi-format `EXPLAIN` query plans, and CSV/JSON query exports.
+- **11 Production-Ready MCP Tools**: Connection health testing, dynamic runtime credential reconfiguration, multi-database discovery (`list_databases`), on-the-fly database switching (`use_database`), table listing, deep schema inspection, safe read query execution, transactional mutations, multi-format `EXPLAIN` query plans, and CSV/JSON query exports.
+- **Multi-Database Support**:
+  - Connects gracefully at the MySQL instance level without requiring a hardcoded initial database.
+  - Dynamically discover all databases with `list_databases()`.
+  - Switch active database context instantly at runtime via `use_database(database_name)`.
+  - Maintains separate schema caches per database.
+- **Universal, Zero-Hardcoding Portability**:
+  - Automatically defaults data storage to the user home directory (`~/.mysql-mcp/exports` and `~/.mysql-mcp/cache`).
+  - Supports packaging and instant execution via `uvx` without needing hardcoded paths or manual environment configuration.
+  - Persists dynamic runtime configurations to `~/.mysql-mcp/config.json`.
 - **AST-Based Query Safety Guardrails (`sqlparse`)**:
   - Differentiates read-only statements (`SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `WITH ... SELECT`) from mutations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, etc.).
   - Rejects dangerous unconstrained `UPDATE` and `DELETE` queries lacking a `WHERE` clause unless `allow_unfiltered=True` is explicitly specified.
@@ -25,7 +34,7 @@ Built for seamless integration with **OpenClaw**, **Claude Desktop**, and agenti
   - Transaction context manager (`transaction()`) with automatic commit on success and rollback on exceptions.
 - **Two-Tier Schema Introspection & Caching**:
   - Deep introspection of tables, views, column types, nullability, defaults, indexes, and foreign key constraints (`ON UPDATE`, `ON DELETE`) from `information_schema`.
-  - In-memory Tier 1 cache + persistent disk Tier 2 cache (`./cache/schema_cache.json`).
+  - In-memory Tier 1 cache + persistent disk Tier 2 cache (`~/.mysql-mcp/cache/schema_<db>.json`).
   - Dual output modes: structured JSON/dictionary and human-readable Markdown summary.
 - **User-Friendly Error Diagnostics**:
   - Translates cryptic MySQL error codes (`1045`, `1049`, `1054`, `1064`, `1146`, `1215`, `1451`) into clear diagnostic explanations and suggested remediation actions.
@@ -42,12 +51,12 @@ mysql-automation-mcp-server/
 ├── src/
 │   └── mysql_mcp/
 │       ├── __init__.py
-│       ├── config.py             # Pydantic Settings & environment config
+│       ├── config.py             # Pydantic Settings, ~/.mysql-mcp persistence, & env config
 │       ├── db.py                 # Pure-Python PyMySQL pooling & transactions
 │       ├── errors.py             # MySQL error diagnostics & guidance catalog
 │       ├── safety.py             # sqlparse query classification & safety rules
-│       ├── schema.py             # Schema extraction, Markdown, & two-tier cache
-│       └── server.py             # FastMCP server with 9 tools, 2 resources, 2 prompts
+│       ├── schema.py             # Per-database schema extraction, Markdown, & two-tier cache
+│       └── server.py             # FastMCP server with 11 tools, 2 resources, 2 prompts
 ├── scripts/
 │   ├── seed_demo_db.py           # Database initializer and sample data generator
 │   └── verify_server_e2e.py      # Complete end-to-end server verification script
@@ -55,10 +64,10 @@ mysql-automation-mcp-server/
 │   ├── test_safety.py            # Unit tests for query safety rules (41 tests)
 │   ├── test_schema.py            # Unit tests for schema extraction & caching (10 tests)
 │   ├── test_seed.py              # Verification of seeded demo database (1 test)
-│   └── test_server.py            # Tests for FastMCP tools, resources & prompts (24 tests)
+│   └── test_server.py            # Tests for FastMCP tools, resources & prompts (27 tests)
 ├── .env.example                  # Environment configuration template
-├── openclaw_config.json          # OpenClaw / Claude Desktop MCP client configuration
-├── pyproject.toml                # Project metadata, dependencies, & pytest settings
+├── openclaw_config.json          # Sanitized OpenClaw / Claude Desktop MCP client configuration
+├── pyproject.toml                # Project metadata, CLI script entrypoint, & pytest settings
 ├── query-patterns.md             # Advanced SQL reference (CTEs, Window, JSON)
 ├── requirements.txt              # Project dependencies
 ├── SKILL.md                      # OpenClaw agent skill definition
@@ -67,9 +76,30 @@ mysql-automation-mcp-server/
 
 ---
 
-## Setup & Installation
+## Universal Setup & Execution
 
-### 1. Clone & Set Up Virtual Environment
+### Option A: Direct Execution via `uvx` (Recommended for End Users)
+
+Any user on Windows, macOS, or Linux can run the MCP server with zero installation:
+
+```json
+{
+  "mcpServers": {
+    "mysql-automation": {
+      "command": "uvx",
+      "args": ["mysql-automation-mcp-server"],
+      "env": {
+        "MYSQL_HOST": "localhost",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "your_mysql_username",
+        "MYSQL_PASSWORD": "your_mysql_password"
+      }
+    }
+  }
+}
+```
+
+### Option B: Local Source Setup (Developers)
 
 ```bash
 git clone https://github.com/shivangbhatt10/mysql-automation-mcp-server.git
@@ -79,70 +109,50 @@ cd mysql-automation-mcp-server
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
-```
+# Install dependencies and local package in editable mode
+pip install -e .
 
-### 2. Configure Environment
-
-Copy `.env.example` to `.env` and fill in your MySQL connection details:
-
-```bash
+# Configure environment
 cp .env.example .env
-```
 
-Default configuration in `.env`:
-```env
-MYSQL_HOST=localhost
-MYSQL_PORT=3306
-MYSQL_USER=root
-MYSQL_PASSWORD=your_password_here
-MYSQL_DATABASE=ecommerce_demo
-MYSQL_DEFAULT_LIMIT=50
-MYSQL_MAX_LIMIT=1000
-MYSQL_EXPORTS_DIR=./exports
-MYSQL_CACHE_DIR=./cache
-```
-
-### 3. Seed Demo Database
-
-Run the database setup script to create `ecommerce_demo` and populate realistic tables (`users`, `products`, `orders`, `order_items`, `reviews`):
-
-```bash
+# Optional: Seed demo database
 python scripts/seed_demo_db.py
-```
 
-### 4. Verify Server End-to-End
-
-Run the automated end-to-end verification script:
-
-```bash
+# Run verification and tests
 python scripts/verify_server_e2e.py
-```
-
-### 5. Run Test Suite
-
-```bash
 pytest -v
 ```
 
 ---
 
+## Multi-Database Management Workflow
+
+When connecting to MySQL instances hosting multiple databases:
+
+1. **Initial Connect**: If no database is specified in `MYSQL_DATABASE`, the server connects at the instance level.
+2. **List Databases**: Call `list_databases()` to see all databases accessible by the user (with system catalogs flagged).
+3. **Switch Active Database**: Call `use_database("analytics_db")` to switch context at runtime without restarting the server.
+4. **Inspect & Query**: All subsequent queries and schema inspections target the newly selected database.
+
+---
+
 ## MCP Tools Reference
 
-The server exposes **9 MCP tools**:
+The server exposes **11 MCP tools**:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | **`test_connection`** | None | Pings the active MySQL instance and returns connection status, roundtrip latency (ms), MySQL version, active database, and pool statistics. |
-| **`configure_connection`** | `host` *(opt)*, `port` *(opt)*, `user` *(opt)*, `password` *(opt)*, `database` *(opt)* | Reconfigures connection credentials dynamically at runtime, rebuilds the connection pool, invalidates caches, and confirms connectivity. |
-| **`list_tables`** | None | Returns a list of all base tables and views in the database with estimated row counts, column counts, and primary keys. |
+| **`configure_connection`** | `host` *(opt)*, `port` *(opt)*, `user` *(opt)*, `password` *(opt)*, `database` *(opt)*, `save_config: bool = True` | Reconfigures connection credentials dynamically at runtime, rebuilds the connection pool, invalidates caches, confirms connectivity, and optionally persists credentials to `~/.mysql-mcp/config.json`. |
+| **`list_databases`** | None | Returns a list of all databases on the connected MySQL server, identifying the active database and filtering/flagging system catalogs. |
+| **`use_database`** | `database_name: str` | Validates that the database exists, switches the active database context, reinitializes the pool, and updates persistent settings. |
+| **`list_tables`** | None | Returns a list of all base tables and views in the active database with estimated row counts, column counts, and primary keys. |
 | **`describe_table`** | `table_name: str` | Returns detailed column definitions (types, nullability, defaults, keys, extra) and indexes for the specified table. |
-| **`get_schema`** | `refresh: bool = False`, `format: str = "markdown"` | Returns the database schema in human-readable Markdown (`format="markdown"`) or structured JSON (`format="json"`). Uses two-tier caching unless `refresh=True`. |
+| **`get_schema`** | `refresh: bool = False`, `format: str = "markdown"` | Returns the database schema in human-readable Markdown (`format="markdown"`) or structured JSON (`format="json"`). Uses two-tier caching per database. |
 | **`execute_query`** | `sql: str`, `limit: int = 50` | Validates that the query is read-only, safely injects or clamps the `LIMIT` clause, executes the query, and returns columns, rows, and execution time (ms). |
 | **`execute_mutation`** | `sql: str`, `confirmed: bool = False`, `allow_unfiltered: bool = False` | Executes `INSERT`, `UPDATE`, `DELETE`, or DDL inside an ACID transaction. Blocks unconstrained `UPDATE`/`DELETE` unless `allow_unfiltered=True`. Requires `confirmed=True` for destructive DDL (`DROP`, `TRUNCATE`, `ALTER`). |
 | **`explain_query`** | `sql: str`, `format: str = "TRADITIONAL"` | Runs `EXPLAIN` on a SQL query and returns the execution plan. Supports `format="TRADITIONAL"`, `format="JSON"`, or `format="TREE"`. |
-| **`export_query_results`** | `sql: str`, `format: str = "csv"`, `filename: str = None` | Executes a read-only query and exports the results to `./exports/<filename>` in CSV or JSON format. Returns file path, row count, and file size. |
+| **`export_query_results`** | `sql: str`, `format: str = "csv"`, `filename: str = None` | Executes a read-only query and exports the results to `~/.mysql-mcp/exports/<filename>` in CSV or JSON format. Returns file path, row count, and file size. |
 
 ---
 
@@ -190,28 +200,22 @@ The server exposes **2 MCP prompts**:
 
 This server can be integrated directly with **OpenClaw** or **Claude Desktop** by adding the configuration block from [`openclaw_config.json`](openclaw_config.json).
 
-### Configuration (`openclaw_config.json` / `claude_desktop_config.json`)
+### Sanitized Client Configuration Template
 
 ```json
 {
   "mcpServers": {
     "mysql-automation": {
-      "command": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\.venv\\Scripts\\python.exe",
+      "command": "uvx",
       "args": [
-        "-m",
-        "mysql_mcp.server"
+        "mysql-automation-mcp-server"
       ],
       "env": {
-        "PYTHONPATH": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\src",
         "MYSQL_HOST": "localhost",
         "MYSQL_PORT": "3306",
-        "MYSQL_USER": "root",
-        "MYSQL_PASSWORD": "your_password_here",
-        "MYSQL_DATABASE": "ecommerce_demo",
-        "MYSQL_DEFAULT_LIMIT": "50",
-        "MYSQL_MAX_LIMIT": "1000",
-        "MYSQL_EXPORTS_DIR": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\exports",
-        "MYSQL_CACHE_DIR": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\cache"
+        "MYSQL_USER": "${MYSQL_USER:-root}",
+        "MYSQL_PASSWORD": "${MYSQL_PASSWORD:-}",
+        "MYSQL_DATABASE": "${MYSQL_DATABASE:-}"
       }
     }
   }

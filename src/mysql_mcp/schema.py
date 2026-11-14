@@ -14,11 +14,12 @@ _IN_MEMORY_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
 _SCHEMA_CACHE_LOCK = threading.Lock()
 
 
-def _get_cache_file_path() -> Path:
-    """Return the filesystem path for the Tier 2 disk cache file."""
+def _get_cache_file_path(database: Optional[str] = None) -> Path:
+    """Return the filesystem path for the Tier 2 disk cache file for a specific database."""
     settings = get_settings()
     settings.ensure_directories()
-    return settings.mysql_cache_dir / "schema_cache.json"
+    target_db = database or settings.mysql_database or "default"
+    return settings.mysql_cache_dir / f"schema_{target_db}.json"
 
 
 def extract_database_schema(database: Optional[str] = None) -> Dict[str, Any]:
@@ -28,6 +29,11 @@ def extract_database_schema(database: Optional[str] = None) -> Dict[str, Any]:
     """
     settings = get_settings()
     target_db = database or settings.mysql_database
+    if not target_db:
+        raise ValueError(
+            "No active database selected. Use 'list_databases()' to see available databases "
+            "and 'use_database(<database_name>)' to select one."
+        )
 
     # 1. Fetch Tables and Views
     tables_result = execute_query(
@@ -207,10 +213,9 @@ def extract_database_schema(database: Optional[str] = None) -> Dict[str, Any]:
             "is_updatable": v["IS_UPDATABLE"].upper() == "YES",
         }
 
-    # Separate base tables from views
     base_tables = {k: v for k, v in tables_meta.items() if v["type"] != "VIEW"}
-
     extracted_at = datetime.now(timezone.utc).isoformat()
+
     return {
         "database": target_db,
         "extracted_at": extracted_at,
@@ -339,17 +344,19 @@ def get_schema(
     """
     Retrieve database schema using two-tier caching:
     1. Tier 1: In-memory cache
-    2. Tier 2: Disk cache (./cache/schema_cache.json)
+    2. Tier 2: Disk cache (~/.mysql-mcp/cache/schema_<db>.json)
     3. Fallback: Live query from information_schema
-
-    Args:
-        refresh: If True, bypasses both tiers and queries information_schema freshly.
-        as_markdown: If True, returns formatted Markdown text; otherwise returns dict.
-        database: Optional target database name (defaults to configured MYSQL_DATABASE).
     """
     settings = get_settings()
     target_db = database or settings.mysql_database
-    cache_file = _get_cache_file_path()
+    if not target_db:
+        raise ValueError(
+            "No active database selected. Use 'list_databases()' to see available databases "
+            "and 'use_database(<db_name>)' to choose one."
+        )
+
+    cache_file = _get_cache_file_path(target_db)
+    legacy_file = settings.mysql_cache_dir / "schema_cache.json"
 
     schema_data: Optional[Dict[str, Any]] = None
 
@@ -359,16 +366,19 @@ def get_schema(
             if target_db in _IN_MEMORY_SCHEMA_CACHE:
                 schema_data = _IN_MEMORY_SCHEMA_CACHE[target_db]
 
-            # 2. Tier 2 check: disk cache
-            elif cache_file.exists():
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        disk_data = json.load(f)
-                    if disk_data.get("database") == target_db:
-                        schema_data = disk_data
-                        _IN_MEMORY_SCHEMA_CACHE[target_db] = schema_data
-                except Exception:
-                    schema_data = None
+            # 2. Tier 2 check: disk cache (check database-specific file, then legacy file)
+            else:
+                for candidate in (cache_file, legacy_file):
+                    if candidate.exists():
+                        try:
+                            with open(candidate, "r", encoding="utf-8") as f:
+                                disk_data = json.load(f)
+                            if disk_data.get("database") == target_db:
+                                schema_data = disk_data
+                                _IN_MEMORY_SCHEMA_CACHE[target_db] = schema_data
+                                break
+                        except Exception:
+                            schema_data = None
 
         # 3. Cache miss or refresh requested: query database
         if schema_data is None:
@@ -403,18 +413,31 @@ def get_schema_markdown(
 
 
 def clear_schema_cache(database: Optional[str] = None) -> None:
-    """Clear both Tier 1 in-memory cache and Tier 2 disk cache."""
+    """Clear Tier 1 in-memory and Tier 2 disk caches for a database (or all if None)."""
     settings = get_settings()
-    target_db = database or settings.mysql_database
-    cache_file = _get_cache_file_path()
 
     with _SCHEMA_CACHE_LOCK:
-        if target_db in _IN_MEMORY_SCHEMA_CACHE:
-            del _IN_MEMORY_SCHEMA_CACHE[target_db]
-
-        if cache_file.exists():
-            try:
-                cache_file.unlink()
-            except Exception:
-                pass
-
+        if database:
+            if database in _IN_MEMORY_SCHEMA_CACHE:
+                del _IN_MEMORY_SCHEMA_CACHE[database]
+            cache_file = _get_cache_file_path(database)
+            if cache_file.exists():
+                try:
+                    cache_file.unlink()
+                except Exception:
+                    pass
+        else:
+            _IN_MEMORY_SCHEMA_CACHE.clear()
+            legacy_file = settings.mysql_cache_dir / "schema_cache.json"
+            if legacy_file.exists():
+                try:
+                    legacy_file.unlink()
+                except Exception:
+                    pass
+            # Clear all schema_*.json
+            if settings.mysql_cache_dir.exists():
+                for f in settings.mysql_cache_dir.glob("schema_*.json"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
