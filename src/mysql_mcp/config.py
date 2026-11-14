@@ -2,9 +2,13 @@
 
 from functools import lru_cache
 from pathlib import Path
+import tempfile
 from typing import Any, Dict
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Determine the project repository root directory
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
@@ -28,9 +32,15 @@ class Settings(BaseSettings):
     mysql_default_limit: int = Field(default=50, description="Default LIMIT for SELECT queries")
     mysql_max_limit: int = Field(default=1000, description="Maximum permitted LIMIT for SELECT queries")
 
-    # Directories
-    mysql_exports_dir: Path = Field(default=Path("./exports"), description="Directory for exported query results")
-    mysql_cache_dir: Path = Field(default=Path("./cache"), description="Directory for cached schemas and queries")
+    # Directories (defaults resolved relative to project root)
+    mysql_exports_dir: Path = Field(
+        default=PROJECT_ROOT / "exports",
+        description="Directory for exported query results",
+    )
+    mysql_cache_dir: Path = Field(
+        default=PROJECT_ROOT / "cache",
+        description="Directory for cached schemas and queries",
+    )
 
     # Connection pooling configuration
     mysql_pool_size: int = Field(default=5, description="Initial/base connection pool size")
@@ -39,10 +49,34 @@ class Settings(BaseSettings):
     mysql_connect_timeout: int = Field(default=10, description="Seconds to wait for establishing a TCP MySQL connection")
     mysql_charset: str = Field(default="utf8mb4", description="MySQL character set")
 
+    @field_validator("mysql_exports_dir", "mysql_cache_dir", mode="after")
+    @classmethod
+    def resolve_directory_path(cls, path_val: Path) -> Path:
+        """Resolve relative directory paths against the project root."""
+        if not path_val.is_absolute():
+            return (PROJECT_ROOT / path_val).resolve()
+        return path_val.resolve()
+
     def ensure_directories(self) -> None:
-        """Ensure exports and cache directories exist on the filesystem."""
-        self.mysql_exports_dir.mkdir(parents=True, exist_ok=True)
-        self.mysql_cache_dir.mkdir(parents=True, exist_ok=True)
+        """
+        Ensure exports and cache directories exist on the filesystem.
+        Falls back to the system temp directory if configured locations have permission issues.
+        """
+        for attr, fallback_subdir in [
+            ("mysql_exports_dir", "exports"),
+            ("mysql_cache_dir", "cache"),
+        ]:
+            target_path: Path = getattr(self, attr)
+            try:
+                target_path.mkdir(parents=True, exist_ok=True)
+            except (OSError, PermissionError):
+                # Graceful fallback to user temp directory
+                fallback_path = Path(tempfile.gettempdir()) / "mysql_mcp" / fallback_subdir
+                try:
+                    fallback_path.mkdir(parents=True, exist_ok=True)
+                    setattr(self, attr, fallback_path)
+                except Exception:
+                    pass
 
     def get_connection_dict(self, database: str | None = None) -> Dict[str, Any]:
         """Return connection parameter dictionary for pymysql.connect."""
@@ -64,6 +98,8 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached singleton instance of Settings."""
     settings = Settings()
-    settings.ensure_directories()
+    try:
+        settings.ensure_directories()
+    except Exception:
+        pass
     return settings
-

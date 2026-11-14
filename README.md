@@ -210,8 +210,8 @@ This server can be integrated directly with **OpenClaw** or **Claude Desktop** b
         "MYSQL_DATABASE": "ecommerce_demo",
         "MYSQL_DEFAULT_LIMIT": "50",
         "MYSQL_MAX_LIMIT": "1000",
-        "MYSQL_EXPORTS_DIR": "./exports",
-        "MYSQL_CACHE_DIR": "./cache"
+        "MYSQL_EXPORTS_DIR": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\exports",
+        "MYSQL_CACHE_DIR": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\cache"
       }
     }
   }
