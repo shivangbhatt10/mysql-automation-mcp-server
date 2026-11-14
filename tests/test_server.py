@@ -12,6 +12,7 @@ from mysql_mcp.server import (
     explain_query,
     export_query_results,
     generate_sql,
+    get_query_history,
     get_query_patterns_resource,
     get_schema,
     get_schema_resource,
@@ -35,6 +36,7 @@ EXPECTED_TOOLS = {
     "execute_mutation",
     "explain_query",
     "export_query_results",
+    "get_query_history",
 }
 
 EXPECTED_RESOURCES = {
@@ -49,12 +51,12 @@ EXPECTED_PROMPTS = {
 
 
 class TestServerRegistration:
-    """Test that all 11 tools, 2 resources, and 2 prompts are registered with FastMCP."""
+    """Test that all 12 tools, 2 resources, and 2 prompts are registered with FastMCP."""
 
     def test_tools_registered(self):
         registered_tools = {t.name for t in asyncio.run(mcp.list_tools())}
         assert EXPECTED_TOOLS.issubset(registered_tools)
-        assert len(registered_tools) == 11
+        assert len(registered_tools) == 12
 
     def test_resources_registered(self):
         registered_resources = {str(r.uri) for r in asyncio.run(mcp.list_resources())}
@@ -235,11 +237,21 @@ class TestToolExecution:
         target_file = Path(res["file_path"])
         assert target_file.exists()
         content = target_file.read_text(encoding="utf-8")
-        assert "Alice Walker" in content
+        assert "alice.walker@example.com" in content
 
     def test_tool_export_query_results_rejects_mutation(self):
         with pytest.raises(QuerySafetyError):
             export_query_results("DELETE FROM users WHERE id = 1;")
+
+    def test_tool_get_query_history(self):
+        # Execute a query to guarantee at least one history item
+        execute_query("SELECT id, name FROM users", limit=2)
+        history = get_query_history(limit=5)
+        assert isinstance(history, list)
+        assert len(history) >= 1
+        assert "tool" in history[0]
+        assert "status" in history[0]
+        assert "sql_raw" in history[0]
 
 
 class TestResourcesAndPrompts:

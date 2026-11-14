@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     mysql_default_limit: int = Field(default=50, description="Default LIMIT for SELECT queries")
     mysql_max_limit: int = Field(default=1000, description="Maximum permitted LIMIT for SELECT queries")
 
-    # Cross-platform user data directories (defaults to ~/.mysql-mcp/exports and ~/.mysql-mcp/cache)
+    # Cross-platform user data directories (defaults to ~/.mysql-mcp/exports, ~/.mysql-mcp/cache, ~/.mysql-mcp/logs)
     mysql_exports_dir: Path = Field(
         default=USER_DATA_DIR / "exports",
         description="Directory for exported query results",
@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     mysql_cache_dir: Path = Field(
         default=USER_DATA_DIR / "cache",
         description="Directory for cached schemas and queries",
+    )
+    mysql_logs_dir: Path = Field(
+        default=USER_DATA_DIR / "logs",
+        description="Directory for query audit logs and execution history",
     )
 
     # Connection pooling configuration
@@ -96,23 +100,24 @@ class Settings(BaseSettings):
     mysql_connect_timeout: int = Field(default=10, description="Seconds to wait for establishing a TCP MySQL connection")
     mysql_charset: str = Field(default="utf8mb4", description="MySQL character set")
 
-    @field_validator("mysql_exports_dir", "mysql_cache_dir", mode="after")
+    @field_validator("mysql_exports_dir", "mysql_cache_dir", "mysql_logs_dir", mode="after")
     @classmethod
     def resolve_directory_path(cls, path_val: Path) -> Path:
         """Resolve relative directory paths safely against USER_DATA_DIR or PROJECT_ROOT."""
         if not path_val.is_absolute():
-            # If path starts with exports or cache, resolve in USER_DATA_DIR
+            # If path starts with exports, cache, or logs, resolve in USER_DATA_DIR
             return (USER_DATA_DIR / path_val).resolve()
         return path_val.resolve()
 
     def ensure_directories(self) -> None:
         """
-        Ensure exports and cache directories exist on the filesystem.
+        Ensure exports, cache, and logs directories exist on the filesystem.
         Falls back to the system temp directory if configured locations encounter permission issues.
         """
         for attr, fallback_subdir in [
             ("mysql_exports_dir", "exports"),
             ("mysql_cache_dir", "cache"),
+            ("mysql_logs_dir", "logs"),
         ]:
             target_path: Path = getattr(self, attr)
             try:

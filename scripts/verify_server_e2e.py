@@ -16,6 +16,7 @@ from mysql_mcp.server import (
     describe_table,
     execute_query,
     export_query_results,
+    get_query_history,
     list_tables,
     test_connection,
 )
@@ -27,7 +28,7 @@ def run_e2e_verification():
     print("=" * 70)
 
     # 1. Connection Health Check
-    print("\n[Step 1/5] Testing MySQL Connection Health...")
+    print("\n[Step 1/6] Testing MySQL Connection Health...")
     ping_result = test_connection()
     if ping_result.get("status") != "healthy":
         print(f"FAILED: MySQL connection unhealthy: {ping_result}")
@@ -38,7 +39,7 @@ def run_e2e_verification():
     print(f"  ✓ Pool Capacity: {ping_result.get('pool', {}).get('max_capacity')} connections")
 
     # 2. Table Listing
-    print("\n[Step 2/5] Fetching Database Tables...")
+    print("\n[Step 2/6] Fetching Database Tables...")
     tables = list_tables()
     table_names = [t["table_name"] for t in tables]
     print(f"  ✓ Discovered {len(tables)} tables: {', '.join(table_names)}")
@@ -48,7 +49,7 @@ def run_e2e_verification():
         sys.exit(1)
 
     # 3. Table Inspection (users)
-    print("\n[Step 3/5] Describing 'users' Table Schema...")
+    print("\n[Step 3/6] Describing 'users' Table Schema...")
     users_info = describe_table("users")
     columns = users_info.get("columns", [])
     primary_keys = users_info.get("primary_key", [])
@@ -63,7 +64,7 @@ def run_e2e_verification():
     print(f"  ✓ Indexes ({len(indexes)}): {', '.join(idx.get('name') for idx in indexes)}")
 
     # 4. SQL Query Execution with JOIN
-    print("\n[Step 4/5] Executing Sample Read-Only JOIN Query...")
+    print("\n[Step 4/6] Executing Sample Read-Only JOIN Query...")
     sample_sql = """
     SELECT
         o.order_number,
@@ -90,7 +91,7 @@ def run_e2e_verification():
         )
 
     # 5. CSV Export Verification
-    print("\n[Step 5/5] Exporting Query Results to CSV...")
+    print("\n[Step 5/6] Exporting Query Results to CSV...")
     export_filename = "demo_orders.csv"
     export_result = export_query_results(
         sample_sql,
@@ -116,6 +117,18 @@ def run_e2e_verification():
     print(f"  ✓ Header preview: {first_lines[0]}")
     if len(first_lines) > 1 and first_lines[1]:
         print(f"  ✓ First row preview: {first_lines[1]}")
+
+    # 6. Audit Trail & Query History Verification
+    print("\n[Step 6/6] Verifying Local Audit Log & Query History...")
+    history = get_query_history(limit=5)
+    if not history:
+        print("FAILED: Query history audit log is empty.")
+        sys.exit(1)
+    print(f"  ✓ Successfully retrieved {len(history)} recent audit log records")
+    latest = history[0]
+    print(f"  ✓ Latest Logged Action: Tool='{latest.get('tool')}' | Status='{latest.get('status')}'")
+    print(f"  ✓ Logged Query: {latest.get('sql_raw')[:50]}...")
+    print(f"  ✓ Audit log file location: ~/.mysql-mcp/logs/query_history.jsonl")
 
     print("\n" + "=" * 70)
     print("🎉 ALL END-TO-END VERIFICATION CHECKS PASSED SUCCESSFULLY!")

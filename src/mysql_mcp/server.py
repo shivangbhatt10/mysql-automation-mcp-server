@@ -9,6 +9,10 @@ import time
 from typing import Any, Dict, List, Optional, Union
 from fastmcp import FastMCP
 
+from mysql_mcp.audit import (
+    get_query_history as get_audit_query_history,
+    log_query,
+)
 from mysql_mcp.config import get_settings, persist_config
 from mysql_mcp.db import (
     close_pool,
@@ -281,20 +285,54 @@ def execute_query(sql: str, limit: int = 50) -> Dict[str, Any]:
     Validate query is read-only, safely inject LIMIT clause, execute,
     and return columns, result rows, and execution time.
     """
-    if not is_read_only(sql):
-        raise QuerySafetyError(
-            "Security violation: execute_query only permits read-only operations "
-            "(SELECT, SHOW, DESCRIBE, EXPLAIN). For INSERT, UPDATE, DELETE, or DDL, use execute_mutation.",
-            query=sql,
-        )
-
     settings = get_settings()
+    current_db = settings.mysql_database
+
+    if not is_read_only(sql):
+        err_msg = (
+            "Security violation: execute_query only permits read-only operations "
+            "(SELECT, SHOW, DESCRIBE, EXPLAIN). For INSERT, UPDATE, DELETE, or DDL, use execute_mutation."
+        )
+        log_query(
+            tool="execute_query",
+            sql=sql,
+            database=current_db,
+            query_type="READ",
+            status="BLOCKED_BY_SAFETY",
+            error=err_msg,
+        )
+        raise QuerySafetyError(err_msg, query=sql)
+
     clamped_limit = min(limit, settings.mysql_max_limit)
     sql_with_limit = inject_limit(sql, limit=clamped_limit, max_limit=settings.mysql_max_limit)
 
     start_time = time.perf_counter()
-    result = db_execute_query(sql_with_limit, auto_limit=False)
-    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    try:
+        result = db_execute_query(sql_with_limit, auto_limit=False)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="execute_query",
+            sql=sql,
+            sql_executed=sql_with_limit,
+            database=current_db,
+            query_type="READ",
+            status="SUCCESS",
+            row_count=len(result["rows"]),
+            execution_time_ms=elapsed_ms,
+        )
+    except Exception as e:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="execute_query",
+            sql=sql,
+            sql_executed=sql_with_limit,
+            database=current_db,
+            query_type="READ",
+            status="FAILED",
+            error=str(e),
+            execution_time_ms=elapsed_ms,
+        )
+        raise
 
     return {
         "columns": result["columns"],
@@ -318,28 +356,71 @@ def execute_mutation(
     - Blocks unconstrained UPDATE / DELETE unless allow_unfiltered=True.
     - Requires confirmed=True for destructive DDL (DROP, TRUNCATE, ALTER).
     """
+    settings = get_settings()
+    current_db = settings.mysql_database
     stmt_type = get_statement_type(sql)
 
     # DDL guardrail: require confirmed=True
     if stmt_type in ("DROP", "TRUNCATE", "ALTER"):
         if not confirmed:
-            raise QuerySafetyError(
+            err_msg = (
                 f"Safety warning: {stmt_type} is a destructive operation that permanently modifies schema or data. "
-                "Pass confirmed=True to confirm execution.",
-                query=sql,
+                "Pass confirmed=True to confirm execution."
             )
+            log_query(
+                tool="execute_mutation",
+                sql=sql,
+                database=current_db,
+                query_type="MUTATION",
+                status="BLOCKED_BY_SAFETY",
+                error=err_msg,
+            )
+            raise QuerySafetyError(err_msg, query=sql)
 
     # Unfiltered mutation guardrail
     if stmt_type in ("UPDATE", "DELETE"):
-        validate_mutation_safety(sql, allow_unfiltered=allow_unfiltered)
+        try:
+            validate_mutation_safety(sql, allow_unfiltered=allow_unfiltered)
+        except QuerySafetyError as e:
+            log_query(
+                tool="execute_mutation",
+                sql=sql,
+                database=current_db,
+                query_type="MUTATION",
+                status="BLOCKED_BY_SAFETY",
+                error=str(e),
+            )
+            raise
 
     start_time = time.perf_counter()
-    with transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(sql)
-            affected_rows = cursor.rowcount
-            last_insert_id = cursor.lastrowid
-    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    try:
+        with transaction() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
+                affected_rows = cursor.rowcount
+                last_insert_id = cursor.lastrowid
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="execute_mutation",
+            sql=sql,
+            database=current_db,
+            query_type="MUTATION",
+            status="SUCCESS",
+            rows_affected=affected_rows,
+            execution_time_ms=elapsed_ms,
+        )
+    except Exception as e:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="execute_mutation",
+            sql=sql,
+            database=current_db,
+            query_type="MUTATION",
+            status="FAILED",
+            error=str(e),
+            execution_time_ms=elapsed_ms,
+        )
+        raise
 
     # If DDL altered structure, clear schema cache
     if stmt_type in ("CREATE", "DROP", "ALTER", "TRUNCATE", "RENAME"):
@@ -359,6 +440,9 @@ def explain_query(sql: str, format: str = "TRADITIONAL") -> Dict[str, Any]:
     """
     Run EXPLAIN on a SQL query and return execution plan (TRADITIONAL, JSON, or TREE).
     """
+    settings = get_settings()
+    current_db = settings.mysql_database
+
     fmt = format.upper().strip()
     if fmt not in ("TRADITIONAL", "JSON", "TREE"):
         raise ValueError("Invalid format. Must be one of: 'TRADITIONAL', 'JSON', 'TREE'.")
@@ -367,7 +451,16 @@ def explain_query(sql: str, format: str = "TRADITIONAL") -> Dict[str, Any]:
     if not is_read_only(sql):
         stmt_type = get_statement_type(sql)
         if stmt_type in ("DROP", "TRUNCATE", "ALTER", "GRANT", "REVOKE"):
-            raise QuerySafetyError(f"Cannot run EXPLAIN on destructive command: {stmt_type}", query=sql)
+            err_msg = f"Cannot run EXPLAIN on destructive command: {stmt_type}"
+            log_query(
+                tool="explain_query",
+                sql=sql,
+                database=current_db,
+                query_type="EXPLAIN",
+                status="BLOCKED_BY_SAFETY",
+                error=err_msg,
+            )
+            raise QuerySafetyError(err_msg, query=sql)
 
     clean_sql = sql.strip().rstrip(";")
     if fmt == "TRADITIONAL":
@@ -376,8 +469,32 @@ def explain_query(sql: str, format: str = "TRADITIONAL") -> Dict[str, Any]:
         explain_sql = f"EXPLAIN FORMAT={fmt} {clean_sql};"
 
     start_time = time.perf_counter()
-    result = db_execute_query(explain_sql, auto_limit=False)
-    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    try:
+        result = db_execute_query(explain_sql, auto_limit=False)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="explain_query",
+            sql=sql,
+            sql_executed=explain_sql,
+            database=current_db,
+            query_type="EXPLAIN",
+            status="SUCCESS",
+            row_count=len(result["rows"]),
+            execution_time_ms=elapsed_ms,
+        )
+    except Exception as e:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="explain_query",
+            sql=sql,
+            sql_executed=explain_sql,
+            database=current_db,
+            query_type="EXPLAIN",
+            status="FAILED",
+            error=str(e),
+            execution_time_ms=elapsed_ms,
+        )
+        raise
 
     plan_output: Any = result["rows"]
     if fmt == "JSON" and result["rows"] and "EXPLAIN" in result["rows"][0]:
@@ -406,50 +523,85 @@ def export_query_results(
     """
     Execute a read-only query and export the results to ./exports/<filename> (CSV or JSON).
     """
-    if not is_read_only(sql):
-        raise QuerySafetyError("Only read-only queries can be exported.", query=sql)
-
     settings = get_settings()
     settings.ensure_directories()
+    current_db = settings.mysql_database
+
+    if not is_read_only(sql):
+        err_msg = "Only read-only queries can be exported."
+        log_query(
+            tool="export_query_results",
+            sql=sql,
+            database=current_db,
+            query_type="EXPORT",
+            status="BLOCKED_BY_SAFETY",
+            error=err_msg,
+        )
+        raise QuerySafetyError(err_msg, query=sql)
 
     fmt = format.lower().strip()
     if fmt not in ("csv", "json"):
         raise ValueError("Export format must be either 'csv' or 'json'.")
 
-    result = db_execute_query(sql, auto_limit=False)
-    columns = result["columns"]
-    rows = result["rows"]
+    start_time = time.perf_counter()
+    try:
+        result = db_execute_query(sql, auto_limit=False)
+        columns = result["columns"]
+        rows = result["rows"]
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if filename:
-        target_name = filename if filename.endswith(f".{fmt}") else f"{filename}.{fmt}"
-    else:
-        target_name = f"export_{timestamp}.{fmt}"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if filename:
+            target_name = filename if filename.endswith(f".{fmt}") else f"{filename}.{fmt}"
+        else:
+            target_name = f"export_{timestamp}.{fmt}"
 
-    target_path = (settings.mysql_exports_dir / target_name).resolve()
+        target_path = (settings.mysql_exports_dir / target_name).resolve()
 
-    if fmt == "csv":
-        with open(target_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(columns)
-            for row in rows:
-                formatted_row = []
-                for col in columns:
-                    val = row.get(col)
-                    if isinstance(val, (dict, list)):
-                        formatted_row.append(json.dumps(val, cls=CustomDataEncoder))
-                    elif isinstance(val, (datetime, date)):
-                        formatted_row.append(val.isoformat())
-                    elif val is None:
-                        formatted_row.append("")
-                    else:
-                        formatted_row.append(str(val))
-                writer.writerow(formatted_row)
-    else:  # json
-        with open(target_path, "w", encoding="utf-8") as f:
-            json.dump(rows, f, indent=2, cls=CustomDataEncoder)
+        if fmt == "csv":
+            with open(target_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                for row in rows:
+                    formatted_row = []
+                    for col in columns:
+                        val = row.get(col)
+                        if isinstance(val, (dict, list)):
+                            formatted_row.append(json.dumps(val, cls=CustomDataEncoder))
+                        elif isinstance(val, (datetime, date)):
+                            formatted_row.append(val.isoformat())
+                        elif val is None:
+                            formatted_row.append("")
+                        else:
+                            formatted_row.append(str(val))
+                    writer.writerow(formatted_row)
+        else:  # json
+            with open(target_path, "w", encoding="utf-8") as f:
+                json.dump(rows, f, indent=2, cls=CustomDataEncoder)
 
-    file_size = target_path.stat().st_size
+        file_size = target_path.stat().st_size
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+        log_query(
+            tool="export_query_results",
+            sql=sql,
+            database=current_db,
+            query_type="EXPORT",
+            status="SUCCESS",
+            row_count=len(rows),
+            execution_time_ms=elapsed_ms,
+        )
+    except Exception as e:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_query(
+            tool="export_query_results",
+            sql=sql,
+            database=current_db,
+            query_type="EXPORT",
+            status="FAILED",
+            error=str(e),
+            execution_time_ms=elapsed_ms,
+        )
+        raise
 
     return {
         "file_path": str(target_path),
@@ -458,6 +610,31 @@ def export_query_results(
         "row_count": len(rows),
         "file_size_bytes": file_size,
     }
+
+
+@mcp.tool()
+def get_query_history(
+    limit: int = 20,
+    status: Optional[str] = None,
+    query_type: Optional[str] = None,
+    tool: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve recent SQL queries executed by the assistant from the local audit log.
+    Useful for reviewing model actions, verifying hallucinations, and post-mortem inspection.
+
+    Args:
+        limit: Number of recent queries to return (default: 20, max: 200).
+        status: Optional status filter ('SUCCESS', 'FAILED', 'BLOCKED_BY_SAFETY').
+        query_type: Optional type filter ('READ', 'MUTATION', 'EXPLAIN', 'EXPORT').
+        tool: Optional tool filter ('execute_query', 'execute_mutation', 'explain_query', 'export_query_results').
+    """
+    return get_audit_query_history(
+        limit=limit,
+        status=status,
+        query_type=query_type,
+        tool=tool,
+    )
 
 
 # ==============================================================================

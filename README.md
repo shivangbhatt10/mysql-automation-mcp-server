@@ -2,10 +2,10 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastMCP](https://img.shields.io/badge/MCP-FastMCP-green.svg)](https://github.com/jlowin/fastmcp)
-[![Tests](https://img.shields.io/badge/tests-79%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-88%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Model Context Protocol (MCP) server for MySQL database operations, schema exploration, dynamic database switching, query execution, safety guardrails, and natural language analytics.
+A Model Context Protocol (MCP) server for MySQL database operations, schema exploration, dynamic database switching, query execution, safety guardrails, query history audit logging, and natural language analytics.
 
 Designed for universal, portable distribution across **OpenClaw**, **Claude Desktop**, and agentic AI systems on Windows, macOS, and Linux.
 
@@ -13,7 +13,11 @@ Designed for universal, portable distribution across **OpenClaw**, **Claude Desk
 
 ## Key Features
 
-- **11 Production-Ready MCP Tools**: Connection health testing, dynamic runtime credential reconfiguration, multi-database discovery (`list_databases`), on-the-fly database switching (`use_database`), table listing, deep schema inspection, safe read query execution, transactional mutations, multi-format `EXPLAIN` query plans, and CSV/JSON query exports.
+- **12 Production-Ready MCP Tools**: Connection health testing, dynamic runtime credential reconfiguration, multi-database discovery (`list_databases`), on-the-fly database switching (`use_database`), table listing, deep schema inspection, safe read query execution, transactional mutations, multi-format `EXPLAIN` query plans, CSV/JSON query exports, and local query history inspection (`get_query_history`).
+- **Query History Audit Logging & Forensic Trail**:
+  - Automatically records every query executed, failed, or blocked by safety guardrails to an append-only JSONL log (`~/.mysql-mcp/logs/query_history.jsonl`).
+  - Guards against and audits LLM hallucinations: inspect the exact raw query requested, modified query with limit injection, duration, affected rows, and error messages.
+  - Review query history anytime directly in chat via the `get_query_history` tool.
 - **Multi-Database Support**:
   - Connects gracefully at the MySQL instance level without requiring a hardcoded initial database.
   - Dynamically discover all databases with `list_databases()`.
@@ -51,20 +55,22 @@ mysql-automation-mcp-server/
 ├── src/
 │   └── mysql_mcp/
 │       ├── __init__.py
+│       ├── audit.py              # Thread-safe query audit logger & history tracker
 │       ├── config.py             # Pydantic Settings, ~/.mysql-mcp persistence, & env config
 │       ├── db.py                 # Pure-Python PyMySQL pooling & transactions
 │       ├── errors.py             # MySQL error diagnostics & guidance catalog
 │       ├── safety.py             # sqlparse query classification & safety rules
 │       ├── schema.py             # Per-database schema extraction, Markdown, & two-tier cache
-│       └── server.py             # FastMCP server with 11 tools, 2 resources, 2 prompts
+│       └── server.py             # FastMCP server with 12 tools, 2 resources, 2 prompts
 ├── scripts/
 │   ├── seed_demo_db.py           # Database initializer and sample data generator
 │   └── verify_server_e2e.py      # Complete end-to-end server verification script
 ├── tests/
+│   ├── test_audit.py             # Unit & integration tests for query audit history (8 tests)
 │   ├── test_safety.py            # Unit tests for query safety rules (41 tests)
 │   ├── test_schema.py            # Unit tests for schema extraction & caching (10 tests)
 │   ├── test_seed.py              # Verification of seeded demo database (1 test)
-│   └── test_server.py            # Tests for FastMCP tools, resources & prompts (27 tests)
+│   └── test_server.py            # Tests for FastMCP tools, resources & prompts (28 tests)
 ├── .env.example                  # Environment configuration template
 ├── openclaw_config.json          # Sanitized OpenClaw / Claude Desktop MCP client configuration
 ├── pyproject.toml                # Project metadata, CLI script entrypoint, & pytest settings
@@ -138,7 +144,7 @@ When connecting to MySQL instances hosting multiple databases:
 
 ## MCP Tools Reference
 
-The server exposes **11 MCP tools**:
+The server exposes **12 MCP tools**:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
@@ -149,10 +155,11 @@ The server exposes **11 MCP tools**:
 | **`list_tables`** | None | Returns a list of all base tables and views in the active database with estimated row counts, column counts, and primary keys. |
 | **`describe_table`** | `table_name: str` | Returns detailed column definitions (types, nullability, defaults, keys, extra) and indexes for the specified table. |
 | **`get_schema`** | `refresh: bool = False`, `format: str = "markdown"` | Returns the database schema in human-readable Markdown (`format="markdown"`) or structured JSON (`format="json"`). Uses two-tier caching per database. |
-| **`execute_query`** | `sql: str`, `limit: int = 50` | Validates that the query is read-only, safely injects or clamps the `LIMIT` clause, executes the query, and returns columns, rows, and execution time (ms). |
-| **`execute_mutation`** | `sql: str`, `confirmed: bool = False`, `allow_unfiltered: bool = False` | Executes `INSERT`, `UPDATE`, `DELETE`, or DDL inside an ACID transaction. Blocks unconstrained `UPDATE`/`DELETE` unless `allow_unfiltered=True`. Requires `confirmed=True` for destructive DDL (`DROP`, `TRUNCATE`, `ALTER`). |
-| **`explain_query`** | `sql: str`, `format: str = "TRADITIONAL"` | Runs `EXPLAIN` on a SQL query and returns the execution plan. Supports `format="TRADITIONAL"`, `format="JSON"`, or `format="TREE"`. |
-| **`export_query_results`** | `sql: str`, `format: str = "csv"`, `filename: str = None` | Executes a read-only query and exports the results to `~/.mysql-mcp/exports/<filename>` in CSV or JSON format. Returns file path, row count, and file size. |
+| **`execute_query`** | `sql: str`, `limit: int = 50` | Validates that the query is read-only, safely injects or clamps the `LIMIT` clause, executes the query, records to audit log, and returns columns, rows, and execution time (ms). |
+| **`execute_mutation`** | `sql: str`, `confirmed: bool = False`, `allow_unfiltered: bool = False` | Executes `INSERT`, `UPDATE`, `DELETE`, or DDL inside an ACID transaction. Blocks unconstrained `UPDATE`/`DELETE` unless `allow_unfiltered=True`. Requires `confirmed=True` for destructive DDL. Records to audit log. |
+| **`explain_query`** | `sql: str`, `format: str = "TRADITIONAL"` | Runs `EXPLAIN` on a SQL query and returns the execution plan. Supports `format="TRADITIONAL"`, `format="JSON"`, or `format="TREE"`. Records to audit log. |
+| **`export_query_results`** | `sql: str`, `format: str = "csv"`, `filename: str = None` | Executes a read-only query and exports the results to `~/.mysql-mcp/exports/<filename>` in CSV or JSON format. Records to audit log. |
+| **`get_query_history`** | `limit: int = 20`, `status: str = None`, `query_type: str = None`, `tool: str = None` | Retrieves recent queries executed by the assistant from the local JSONL audit trail (`~/.mysql-mcp/logs/query_history.jsonl`) for compliance, review, and detecting LLM hallucinations. |
 
 ---
 
