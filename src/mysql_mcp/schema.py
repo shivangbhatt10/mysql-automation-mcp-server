@@ -417,3 +417,4 @@ def clear_schema_cache(database: Optional[str] = None) -> None:
                 cache_file.unlink()
             except Exception:
                 pass
+

@@ -216,3 +216,4 @@ class TestTwoTierCaching:
         clear_schema_cache()
         assert not cache_file.exists()
         assert "ecommerce_demo" not in _IN_MEMORY_SCHEMA_CACHE
+
