@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "mysql-automation": {
+      "command": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "mysql_mcp.server"
+      ],
+      "env": {
+        "PYTHONPATH": "C:\\Users\\HP\\Desktop\\openclaw-skill\\mysql-automation-mcp-server\\src",
+        "MYSQL_HOST": "localhost",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "root",
+        "MYSQL_PASSWORD": "Jayjil123",
+        "MYSQL_DATABASE": "ecommerce_demo",
+        "MYSQL_DEFAULT_LIMIT": "50",
+        "MYSQL_MAX_LIMIT": "1000",
+        "MYSQL_EXPORTS_DIR": "./exports",
+        "MYSQL_CACHE_DIR": "./cache"
+      }
+    }
+  }
+}
